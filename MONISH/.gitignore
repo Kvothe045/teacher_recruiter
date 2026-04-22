@@ -177,3 +177,4 @@ dist/
 build/
 .next/
 .env
+interviewer/node_modules
