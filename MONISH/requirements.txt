@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+python-dotenv
+pdfplumber
+edge-tts
+gtts
+google-genai
+gunicorn
