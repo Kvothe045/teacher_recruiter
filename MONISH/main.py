@@ -20,7 +20,7 @@ from google.genai import types
 
 # --- CONFIGURATION ---
 load_dotenv()
-API_KEY = "AIzaSyCIU8075NLBL0orO7THVP4q4yMmmqljjj0"
+API_KEY = os.getenv("API_KEY")
 
 app = FastAPI()
 
