@@ -23,23 +23,18 @@ const getWebSocketURL = (url: string) => {
 };
 
 // --- IMPROVED TOUR TOOLTIP COMPONENT ---
-// Added 'align' prop to handle edge cases (like the top-right button on mobile)
 const TourTooltip = ({ text, onClose, align = 'center' }: { text: string, onClose: () => void, align?: 'center' | 'right' | 'left' }) => (
   <div className={`absolute z-[100] top-full mt-3 w-40 md:w-48 bg-blue-600 text-white text-xs p-3 rounded-xl shadow-2xl animate-in fade-in slide-in-from-top-2 border border-blue-400/50
     ${align === 'center' ? 'left-1/2 -translate-x-1/2' : ''}
     ${align === 'right' ? 'right-0' : ''}
     ${align === 'left' ? 'left-0' : ''}
   `}>
-    {/* Arrow */}
     <div className={`absolute -top-1.5 w-3 h-3 bg-blue-600 rotate-45 border-t border-l border-blue-400/50
         ${align === 'center' ? 'left-1/2 -translate-x-1/2' : ''}
         ${align === 'right' ? 'right-3' : ''}
         ${align === 'left' ? 'left-3' : ''}
     `}></div>
-    
-    <div className="relative z-10 font-medium leading-relaxed text-center">
-        {text}
-    </div>
+    <div className="relative z-10 font-medium leading-relaxed text-center">{text}</div>
     <button 
         onClick={(e) => { e.stopPropagation(); onClose(); }} 
         className="mt-2 text-[10px] uppercase font-bold bg-white/20 hover:bg-white/30 active:bg-white/40 w-full py-1.5 rounded transition-colors"
@@ -56,37 +51,32 @@ export default function InterviewPage() {
   const [sessionId, setSessionId] = useState('');
   const [isUploading, setIsUploading] = useState(false);
 
-  // --- SERVER HEALTH STATE ---
   const [serverStatus, setServerStatus] = useState<'checking' | 'waking' | 'ready'>('checking');
   const [pingCount, setPingCount] = useState(0);
 
-  // Settings
   const [selectedDuration, setSelectedDuration] = useState(15); 
 
-  // Timers
   const [globalTime, setGlobalTime] = useState(0); 
   const [silenceTime, setSilenceTime] = useState(SILENCE_THRESHOLD);
   
-  // State
   const [transcriptData, setTranscriptData] = useState<{sender:string, text:string}[]>([]);
   const [status, setStatus] = useState<'Idle' | 'Listening' | 'Speaking' | 'Processing' | 'Completed' | 'Feedback'>('Idle');
   const [feedback, setFeedback] = useState('');
+  const [fullTranscript, setFullTranscript] = useState('');
 
-  // --- TOUR STATE ---
-  const [showTimeTour, setShowTimeTour] = useState(true); // Shows immediately on Step 2
-  const [showSilenceTour, setShowSilenceTour] = useState(false); // Shows on first Listen
-  const [hasSeenSilenceTour, setHasSeenSilenceTour] = useState(false); // Track if seen
+  const [showTimeTour, setShowTimeTour] = useState(true);
+  const [showSilenceTour, setShowSilenceTour] = useState(false);
+  const [hasSeenSilenceTour, setHasSeenSilenceTour] = useState(false);
 
-  // Refs
   const socketRef = useRef<WebSocket | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   
-  // LOGIC REFS
   const lastSpokenRef = useRef<number>(Date.now());
   const silenceIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const globalIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  
-  // UI Refs
+  // Stays true once feedback arrives — always current inside audio/timer callbacks
+  const isInterviewFinishedRef = useRef<boolean>(false);
+
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
   const liveTextEndRef = useRef<HTMLSpanElement | null>(null);
 
@@ -97,21 +87,16 @@ export default function InterviewPage() {
     browserSupportsSpeechRecognition
   } = useSpeechRecognition();
 
-  // --- 1. SERVER WAKE UP PROTOCOL ---
+  // --- SERVER WAKE UP PROTOCOL ---
   useEffect(() => {
     let isMounted = true;
-    
     const checkServer = async () => {
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000); 
-
             const res = await fetch(`${BACKEND_URL}/`, { signal: controller.signal });
             clearTimeout(timeoutId);
-
-            if (isMounted) {
-                setServerStatus('ready');
-            }
+            if (isMounted) setServerStatus('ready');
         } catch (e) {
             if (isMounted) {
                 setServerStatus('waking');
@@ -120,82 +105,56 @@ export default function InterviewPage() {
             }
         }
     };
-
     checkServer();
-
     return () => { isMounted = false; };
   }, []);
 
-  // --- 2. HEARTBEAT (KEEPS SERVER AWAKE DURING INTERVIEW) ---
+  // --- HEARTBEAT ---
   useEffect(() => {
-    // Only run this when the interview is active (Step 2)
     if (step === 2 && sessionId) {
-        console.log("Heartbeat started");
-        
         const heartbeatInterval = setInterval(async () => {
-            try {
-                // This sends a lightweight GET request to the backend every 45 seconds
-                // It will show up in your Uvicorn logs as: "GET / HTTP/1.1" 200 OK
-                await fetch(`${BACKEND_URL}/`);
-                console.log("Heartbeat sent to server");
-            } catch (e) {
-                console.warn("Heartbeat failed", e);
-            }
-        }, 90000); // 90 Seconds
-
+            try { await fetch(`${BACKEND_URL}/`); } catch (e) {}
+        }, 90000);
         return () => clearInterval(heartbeatInterval);
     }
   }, [step, sessionId]);
 
-  // --- 2. TOUR LOGIC (SILENCE) ---
+  // --- TOUR LOGIC (SILENCE) ---
   useEffect(() => {
-    // When we enter Listening mode for the FIRST time, show the silence tour
     if (status === 'Listening' && !hasSeenSilenceTour && step === 2) {
         setShowSilenceTour(true);
         setHasSeenSilenceTour(true);
     }
   }, [status, hasSeenSilenceTour, step]);
 
-
-  // --- 3. SCROLLING ---
+  // --- SCROLLING ---
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [transcriptData]);
 
   useEffect(() => {
-    if (transcript.length > 0) {
-        liveTextEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
+    if (transcript.length > 0) liveTextEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [transcript]);
 
-  // --- 4. BATCH LISTENING LOGIC ---
+  // --- BATCH LISTENING LOGIC ---
   useEffect(() => {
-    if (listening && transcript.length > 0) {
-        lastSpokenRef.current = Date.now();
-    }
+    if (listening && transcript.length > 0) lastSpokenRef.current = Date.now();
   }, [transcript, listening]);
 
   useEffect(() => {
     if (status === 'Listening') {
         if (silenceIntervalRef.current) clearInterval(silenceIntervalRef.current);
-
         silenceIntervalRef.current = setInterval(() => {
             const now = Date.now();
             const timeSinceLastWord = (now - lastSpokenRef.current) / 1000;
             const remaining = Math.max(0, SILENCE_THRESHOLD - Math.floor(timeSinceLastWord));
-            
             setSilenceTime(remaining); 
-
-            if (remaining === 0) {
-                commitUserResponse(); 
-            }
+            if (remaining === 0) commitUserResponse(); 
         }, 1000);
     } else {
         if (silenceIntervalRef.current) clearInterval(silenceIntervalRef.current);
     }
-    return () => {
-        if (silenceIntervalRef.current) clearInterval(silenceIntervalRef.current);
-    };
+    return () => { if (silenceIntervalRef.current) clearInterval(silenceIntervalRef.current); };
   }, [status]);
 
   const commitUserResponse = () => {
@@ -207,17 +166,12 @@ export default function InterviewPage() {
   useEffect(() => {
     if (status === 'Processing') {
         const finalText = transcript.trim();
-        
         if (finalText.length > 0) {
             setTranscriptData(prev => [...prev, { sender: 'User', text: finalText }]);
-            if (socketRef.current) {
-                socketRef.current.send(JSON.stringify({ text: finalText, type: 'answer' }));
-            }
+            if (socketRef.current) socketRef.current.send(JSON.stringify({ text: finalText, type: 'answer' }));
         } else {
             setTranscriptData(prev => [...prev, { sender: 'System', text: 'No response detected...' }]);
-            if (socketRef.current) {
-                socketRef.current.send(JSON.stringify({ text: '', type: 'silence_timeout' }));
-            }
+            if (socketRef.current) socketRef.current.send(JSON.stringify({ text: '', type: 'silence_timeout' }));
         }
         resetTranscript(); 
     }
@@ -225,22 +179,16 @@ export default function InterviewPage() {
 
   // --- STEP 1: UPLOAD ---
   const handleStart = async () => {
-    if (!browserSupportsSpeechRecognition) return alert("Please use Chrome/Edge.");
     if (!jd) return alert("Please enter a Job Description");
-    
     setIsUploading(true);
     try {
       const formData = new FormData();
       formData.append('jd', jd);
       if (resumeFile) formData.append('resume', resumeFile);
-
       const res = await fetch(`${BACKEND_URL}/upload-context`, { method: 'POST', body: formData });
-      
       if(!res.ok) throw new Error(`Server error: ${res.status}`);
-
       const data = await res.json();
       setSessionId(data.session_id);
-      
       setGlobalTime(selectedDuration * 60);
       setStep(2);
     } catch (err) {
@@ -255,10 +203,7 @@ export default function InterviewPage() {
     if (step === 2 && sessionId) {
       globalIntervalRef.current = setInterval(() => {
         setGlobalTime(prev => {
-           if (prev <= 1) {
-              handleEndInterview(); 
-              return 0;
-           }
+           if (prev <= 1) { handleEndInterview(); return 0; }
            return prev - 1;
         });
       }, 1000);
@@ -270,9 +215,19 @@ export default function InterviewPage() {
         const data = JSON.parse(event.data);
         
         if (data.type === 'feedback') {
+            // Mark finished FIRST so any in-flight audio onended won't re-start listening
+            isInterviewFinishedRef.current = true;
             setFeedback(data.text);
+            if (data.transcript) setFullTranscript(data.transcript);
             setStatus('Feedback');
             stopGlobalTimer();
+            SpeechRecognition.stopListening();
+            if (silenceIntervalRef.current) clearInterval(silenceIntervalRef.current);
+            // Stop any audio that's currently playing
+            if (audioRef.current) {
+                audioRef.current.onended = null;
+                audioRef.current.pause();
+            }
             ws.close();
             return;
         }
@@ -300,12 +255,12 @@ export default function InterviewPage() {
   };
 
   const handleEndInterview = () => {
+      isInterviewFinishedRef.current = true;  // block any new listen cycles immediately
       stopGlobalTimer();
       SpeechRecognition.stopListening();
       if (silenceIntervalRef.current) clearInterval(silenceIntervalRef.current);
-      
-      if (socketRef.current) {
-          socketRef.current.send(JSON.stringify({ text: "END_INTERVIEW_NOW", type: "time_up" }));
+      if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+          socketRef.current.send(JSON.stringify({ text: '', type: 'end_interview' }));
       }
   };
 
@@ -313,10 +268,8 @@ export default function InterviewPage() {
   const playAudio = (base64Audio: string) => {
     SpeechRecognition.stopListening();
     if (silenceIntervalRef.current) clearInterval(silenceIntervalRef.current);
-    
     const audioBlob = base64ToBlob(base64Audio, 'audio/mp3');
     const url = URL.createObjectURL(audioBlob);
-    
     if (audioRef.current) {
       audioRef.current.src = url;
       audioRef.current.play();
@@ -325,30 +278,20 @@ export default function InterviewPage() {
   };
 
   const startListeningCycle = () => {
-    if(status === 'Completed' || status === 'Feedback') return;
-    
+    // Use the ref — status in this closure may be stale when called from audio.onended
+    if(isInterviewFinishedRef.current) return;
     resetTranscript();
     setStatus('Listening');
-    
     lastSpokenRef.current = Date.now();
     setSilenceTime(SILENCE_THRESHOLD); 
-    
     SpeechRecognition.startListening({ continuous: true, language: 'en-US' });
   };
 
-//   const addTime = () => {
-//       lastSpokenRef.current = Date.now();
-//       setSilenceTime(SILENCE_THRESHOLD);
-//   };
-// --- UPDATED: ADD 10 SECONDS LOGIC ---
   const addTime = () => {
-      // By adding 10000ms to the "last spoken" reference, the diff (now - lastSpoken) becomes smaller/negative,
-      // which increases the 'remaining' calculation in the interval loop.
       lastSpokenRef.current += 10000;
       setSilenceTime(prev => prev + 10);
   };
 
-  // --- UI HELPERS ---
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -370,36 +313,23 @@ export default function InterviewPage() {
 
     doc.setFontSize(12);
     doc.setTextColor(0, 0, 0);
-
     const textLines = doc.splitTextToSize(feedback, maxLineWidth);
-
     textLines.forEach((line: string) => {
-        if (yPosition + 10 > pageHeight - margin) {
-            doc.addPage();
-            yPosition = margin;
-        }
+        if (yPosition + 10 > pageHeight - margin) { doc.addPage(); yPosition = margin; }
         doc.text(line, margin, yPosition);
         yPosition += 7;
     });
-
     doc.save("Interview_Feedback.pdf");
   };
 
   function base64ToBlob(base64: string, mime: string) {
     const byteCharacters = atob(base64);
     const byteNumbers = new Array(byteCharacters.length);
-    for (let i = 0; i < byteCharacters.length; i++) {
-      byteNumbers[i] = byteCharacters.charCodeAt(i);
-    }
-    const byteArray = new Uint8Array(byteNumbers);
-    return new Blob([byteArray], { type: mime });
+    for (let i = 0; i < byteCharacters.length; i++) byteNumbers[i] = byteCharacters.charCodeAt(i);
+    return new Blob([new Uint8Array(byteNumbers)], { type: mime });
   }
 
-  // --- RENDER ---
-  if (!browserSupportsSpeechRecognition && step === 1) return <div className="p-10 text-white">Please use Google Chrome or Microsoft Edge.</div>;
-
   return (
-    // Use h-[100dvh] for mobile browsers to handle address bars correctly
     <div className="h-[100dvh] bg-gray-950 text-gray-100 font-sans flex flex-col overflow-hidden">
       
       {/* HEADER */}
@@ -420,15 +350,12 @@ export default function InterviewPage() {
                         <XCircle size={16} /> <span className="hidden md:inline">End</span>
                     </button>
                  )}
-
                  <div className="flex items-center gap-2 bg-gray-800 px-3 py-1.5 md:px-4 md:py-2 rounded-full border border-gray-700">
                     <Clock size={16} className="text-blue-400 animate-pulse" />
                     <span className={`font-mono text-sm md:text-xl font-bold ${globalTime < 60 ? 'text-red-500' : 'text-white'}`}>
                         {formatTime(globalTime)}
                     </span>
                  </div>
-                 
-                 {/* DURATION INCREASE BUTTON + TOUR */}
                  <div className="relative">
                     <button 
                         onClick={() => setGlobalTime(t => t + 120)}
@@ -436,7 +363,6 @@ export default function InterviewPage() {
                     >
                         <Plus size={12}/> <span className="hidden md:inline">2m</span>
                     </button>
-                    {/* TOUR 1: DURATION (Aligned Right for Mobile Safety) */}
                     {showTimeTour && (
                         <TourTooltip 
                             text="Need more time? Click here to extend the interview." 
@@ -466,8 +392,6 @@ export default function InterviewPage() {
                 <FileText size={40} className="mx-auto text-blue-500 mb-2 md:mb-4"/>
                 <h2 className="text-xl md:text-2xl font-bold">Setup Interview</h2>
            </div>
-
-           {/* SERVER STATUS CARD */}
            {serverStatus !== 'ready' && (
                <div className="bg-amber-900/20 border border-amber-800/50 p-3 md:p-4 rounded-xl flex flex-col gap-3 animate-pulse">
                    <div className="flex items-center gap-3 text-amber-300">
@@ -477,11 +401,9 @@ export default function InterviewPage() {
                            <p className="text-xs opacity-80">Takes ~40-50s (Free Tier)</p>
                        </div>
                    </div>
-                   
                    <div className="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
                        <div className="bg-amber-500 h-full animate-progress-indeterminate"></div>
                    </div>
-
                    <div className="bg-gray-900/50 p-2 md:p-3 rounded-lg flex items-start gap-2 border border-amber-500/10">
                        <Coffee className="text-amber-400 shrink-0" size={16} />
                        <div className="text-xs text-gray-400 leading-tight">
@@ -490,14 +412,12 @@ export default function InterviewPage() {
                    </div>
                </div>
            )}
-           
            <textarea 
               placeholder="Paste Job Description (JD)..." 
               className="w-full p-3 md:p-4 bg-gray-950 rounded-xl border border-gray-700 focus:border-blue-500 outline-none transition-all text-sm md:text-base"
               rows={4}
               onChange={(e) => setJd(e.target.value)}
             />
-            
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="relative border-2 border-dashed border-gray-700 rounded-xl p-4 flex flex-col items-center justify-center hover:border-blue-500 transition-colors cursor-pointer group h-24 md:h-32">
                     <input 
@@ -511,7 +431,6 @@ export default function InterviewPage() {
                         {resumeFile ? resumeFile.name : "Upload Resume (PDF)"}
                     </span>
                 </div>
-
                 <div className="relative h-auto md:h-32">
                     <label className="block text-gray-400 text-xs uppercase font-bold mb-2 md:mb-2">Duration</label>
                     <select 
@@ -526,7 +445,6 @@ export default function InterviewPage() {
                     </select>
                 </div>
             </div>
-
             <button 
                 onClick={handleStart} 
                 disabled={isUploading || serverStatus !== 'ready'}
@@ -580,12 +498,8 @@ export default function InterviewPage() {
                                 <div className={`font-mono text-xl md:text-2xl font-bold ${silenceTime <= 3 ? 'text-red-500' : 'text-white'}`}>
                                     {silenceTime}s
                                 </div>
-                                
-                                {/* BUTTON WRAPPER FOR RELATIVE POSITIONING */}
                                 <div className="relative">
                                     <button onClick={addTime} className="hover:bg-gray-700 rounded-full text-blue-400 p-1 transition-colors"><Plus size={16}/></button>
-                                    
-                                    {/* TOUR 2: SILENCE TIMER (Centered) */}
                                     {showSilenceTour && (
                                         <TourTooltip 
                                             text="Need to think? Tap (+) to increase the timer." 
@@ -598,37 +512,27 @@ export default function InterviewPage() {
                         )}
                     </div>
 
-                    {/* --- DYNAMIC AVATAR CIRCLE --- */}
+                    {/* DYNAMIC AVATAR CIRCLE */}
                     <div className="flex-1 flex flex-col items-center justify-center w-full min-h-0 z-10">
-                         
-                         {/* MAIN CIRCLE CONTAINER */}
                          <div className={`w-32 h-32 md:w-48 md:h-48 rounded-full flex items-center justify-center mb-4 md:mb-6 transition-all duration-700 relative flex-none 
                             ${status === 'Listening' ? 'bg-red-500/10 border-4 border-red-500/50 shadow-[0_0_40px_rgba(239,68,68,0.2)]' : 
                               status === 'Speaking' ? 'bg-blue-600/10 border-4 border-blue-500 scale-105 md:scale-110 shadow-[0_0_60px_rgba(37,99,235,0.4)]' : 
                               status === 'Processing' ? 'scale-110 shadow-[0_0_50px_rgba(168,85,247,0.4)] border-none' :
-                              // IDLE STATE (ACTIVE BUT CALM)
                               'bg-cyan-900/10 border-2 border-cyan-500/30 shadow-[0_0_30px_rgba(6,182,212,0.15)] hover:shadow-cyan-500/30 transition-shadow'
                             }`}>
-                                
-                                {/* PROCESSING: SPINNING ORB RING */}
                                 {status === 'Processing' && (
                                     <div className="absolute inset-0 rounded-full border-4 border-t-purple-500 border-r-blue-500 border-b-purple-500 border-l-blue-500 animate-spin opacity-80"></div>
                                 )}
-                                
-                                {/* ICONS & ANIMATIONS */}
                                 {status === 'Speaking' && <Bot size={60} className="text-blue-400 animate-pulse md:w-20 md:h-20" />}
                                 {status === 'Listening' && <User size={60} className="text-red-400 md:w-20 md:h-20" />}
-                                
                                 {status === 'Processing' && (
                                     <BrainCircuit size={60} className="text-purple-400 animate-pulse md:w-20 md:h-20 z-10 drop-shadow-[0_0_10px_rgba(168,85,247,0.8)]" />
                                 )}
-
                                 {status === 'Idle' && (
                                     <Sparkles size={60} className="text-cyan-400 animate-pulse duration-[3000ms] md:w-20 md:h-20 opacity-80" />
                                 )}
                          </div>
 
-                         {/* STATUS TEXT */}
                          <h2 className={`text-xl md:text-2xl font-bold flex-none transition-colors duration-500 
                             ${status === 'Processing' ? 'text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-blue-400 animate-pulse' : 
                               status === 'Idle' ? 'text-cyan-300' : 
@@ -639,12 +543,10 @@ export default function InterviewPage() {
                                  status}
                          </h2>
                          
-                         {/* MOBILE ONLY CAPTION */}
                          <div className="lg:hidden w-full text-center mt-2 h-10 overflow-hidden">
                             {listening ? <span className="text-xs text-gray-400 italic">"{transcript}"</span> : <span className="text-gray-600 text-xs">...</span>}
                          </div>
 
-                         {/* DESKTOP CAPTION BOX */}
                          <div className="hidden lg:block w-full mt-4 h-24 overflow-y-auto bg-gray-800/50 rounded-lg p-3 text-center border border-gray-700/50 relative">
                             <p className="text-gray-300 text-sm leading-relaxed">
                                 {listening ? (
@@ -666,7 +568,6 @@ export default function InterviewPage() {
                          {status === 'Speaking' ? [1,2,3,4,5].map(i => (
                              <div key={i} className="w-1 md:w-1.5 bg-blue-500 rounded-full animate-bounce" style={{height: '20px', animationDelay: `${i*0.1}s`}}></div>
                          )) : (
-                             // IDLE / PROCESSING VISUALIZER
                              <div className={`w-full h-[1px] ${status === 'Processing' ? 'bg-purple-500/50' : 'bg-gray-800'} relative overflow-hidden`}>
                                  {status === 'Processing' && <div className="absolute inset-0 bg-gradient-to-r from-transparent via-purple-400 to-transparent w-1/2 animate-[shimmer_1s_infinite]"></div>}
                              </div>
@@ -677,18 +578,43 @@ export default function InterviewPage() {
             <audio ref={audioRef} className="hidden" />
           </div>
 
-          {/* RIGHT: TRANSCRIPT (Bottom on Mobile, Right on Desktop) */}
+          {/* RIGHT: TRANSCRIPT */}
           <div className="flex-1 lg:h-full bg-gray-900 rounded-2xl md:rounded-3xl border border-gray-800 shadow-2xl overflow-hidden flex flex-col min-h-0">
-             <div className="flex-none p-3 md:p-4 border-b border-gray-800 flex justify-between items-center bg-gray-900/95 backdrop-blur z-10">
-                 <h3 className="text-[10px] md:text-xs font-bold text-gray-500 uppercase tracking-widest">Transcript History</h3>
-                 <span className="flex items-center gap-2 text-[10px] md:text-xs text-green-400"><div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div> Live</span>
-             </div>
+
+            {/* TRANSCRIPT HEADER */}
+            <div className="flex-none p-3 md:p-4 border-b border-gray-800 flex justify-between items-center bg-gray-900/95 backdrop-blur z-10">
+                <h3 className="text-[10px] md:text-xs font-bold text-gray-500 uppercase tracking-widest">Transcript History</h3>
+                {status === 'Feedback' ? (
+                  <span className="flex items-center gap-2 text-[10px] md:text-xs text-red-400 font-bold uppercase tracking-wide">
+                    <div className="w-2 h-2 bg-red-500 rounded-full"></div> Ended
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-2 text-[10px] md:text-xs text-green-400">
+                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div> Live
+                  </span>
+                )}
+            </div>
+
+            {/* ── INTERVIEW ENDED BANNER ── */}
+            {status === 'Feedback' && (
+              <div className="flex-none px-4 py-3 md:py-4 bg-gradient-to-r from-red-950/70 via-gray-900/80 to-red-950/70 border-b border-red-800/40 animate-in fade-in slide-in-from-top-2 duration-500">
+                <p className="text-center text-red-400 text-xs md:text-sm font-extrabold uppercase tracking-widest leading-tight">
+                  🎙️ Interview Has Ended
+                </p>
+                <p className="text-center text-gray-400 text-[10px] md:text-xs font-medium mt-0.5">
+                  You may leave &mdash; have a good day! 👋
+                </p>
+              </div>
+            )}
              
-             <div className="flex-1 overflow-y-auto p-3 md:p-4 space-y-3 md:space-y-4 custom-scrollbar">
+            <div className="flex-1 overflow-y-auto p-3 md:p-4 space-y-3 md:space-y-4 custom-scrollbar">
                 {transcriptData.map((msg, i) => (
                     <div key={i} className={`flex ${msg.sender === 'AI' ? 'justify-start' : 'justify-end'} animate-in fade-in slide-in-from-bottom-2`}>
-                        {msg.sender === 'AI' && <div className="w-6 h-6 md:w-8 md:h-8 rounded-full bg-gray-800 border border-gray-700 flex items-center justify-center mr-2 flex-shrink-0"><Bot size={12} className="text-blue-400 md:w-4 md:h-4"/></div>}
-                        
+                        {msg.sender === 'AI' && (
+                          <div className="w-6 h-6 md:w-8 md:h-8 rounded-full bg-gray-800 border border-gray-700 flex items-center justify-center mr-2 flex-shrink-0">
+                            <Bot size={12} className="text-blue-400 md:w-4 md:h-4"/>
+                          </div>
+                        )}
                         <div className={`px-3 py-2 md:px-4 md:py-3 max-w-[85%] rounded-2xl text-xs md:text-sm leading-relaxed ${
                             msg.sender === 'AI' ? 'bg-gray-800 text-gray-200 rounded-tl-none border border-gray-700' : 
                             msg.sender === 'System' ? 'bg-red-900/20 text-red-300 border border-red-800 text-center w-full italic' :
@@ -699,7 +625,7 @@ export default function InterviewPage() {
                     </div>
                 ))}
                 <div ref={transcriptEndRef} />
-             </div>
+            </div>
           </div>
         </div>
       )}
